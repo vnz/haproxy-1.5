@@ -1,0 +1,26 @@
+#!/bin/sh
+
+set -e
+
+USER=haproxy
+GROUP=haproxy
+
+groups "$GROUP" > /dev/null 2>&1 || addgroup --system "$GROUP"
+id "$USER" > /dev/null 2>&1 || adduser --system --no-create-home --ingroup "$GROUP" "$USER"
+
+if [ ! -e /var/run/haproxy ]; then 
+  mkdir /var/run/haproxy 
+fi 
+
+if [ ! -e /var/log/haproxy ]; then 
+  mkdir /var/log/haproxy
+  chgrp adm /var/log/haproxy
+fi 
+
+if [ ! -e /var/lib/haproxy ]; then 
+  mkdir /var/lib/haproxy
+  chown nobody /var/lib/haproxy
+  chgrp nogroup /var/lib/haproxy
+fi 
+
+#DEBHELPER#

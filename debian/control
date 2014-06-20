@@ -1,0 +1,19 @@
+Source: haproxy
+Section: net
+Priority: optional
+Maintainer: vnz <vincent.leraitre@ebuzzing.com>
+Build-Depends: debhelper (>= 8.0.0), libpcre3-dev, libssl-dev, zlib1g-dev
+Standards-Version: 3.9.3
+Homepage: http://haproxy.1wt.eu/
+#Vcs-Git: git://git.debian.org/collab-maint/haproxy.git
+#Vcs-Browser: http://git.debian.org/?p=collab-maint/haproxy.git;a=summary
+
+Package: haproxy
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser
+Description: fast and reliable load balancing reverse proxy
+ HAProxy is a TCP/HTTP reverse proxy which is particularly suited for high
+ availability environments. It features connection persistence through HTTP
+ cookies, load balancing, header addition, modification, deletion both ways. It
+ has request blocking capabilities and provides interface to display server
+ status.
