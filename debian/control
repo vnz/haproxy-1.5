@@ -5,8 +5,8 @@ Maintainer: vnz <vincent.leraitre@ebuzzing.com>
 Build-Depends: debhelper (>= 8.0.0), libpcre3-dev, libssl-dev, zlib1g-dev
 Standards-Version: 3.9.3
 Homepage: http://haproxy.1wt.eu/
-#Vcs-Git: git://git.debian.org/collab-maint/haproxy.git
-#Vcs-Browser: http://git.debian.org/?p=collab-maint/haproxy.git;a=summary
+#Vcs-Git: git@github.com:vnz/haproxy.git
+Vcs-Browser: https://github.com/vnz/haproxy
 
 Package: haproxy
 Architecture: any
