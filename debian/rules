@@ -8,6 +8,8 @@
 # Uncomment this to turn on verbose mode.
 export DH_VERBOSE=1
 
+export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed
+
 MAKEARGS=DESTDIR=debian/haproxy \
          PREFIX=/usr \
          IGNOREGIT=true \
@@ -19,6 +21,9 @@ MAKEARGS=DESTDIR=debian/haproxy \
          USE_OPENSSL=1 \
          USE_ZLIB=1 \
          USE_CPU_AFFINITY=1
+
+MAKEARGS += CFLAGS="$(shell dpkg-buildflags --get CFLAGS) $(shell dpkg-buildflags --get CPPFLAGS)"
+MAKEARGS += LDFLAGS="$(shell dpkg-buildflags --get LDFLAGS)"
 
 %:
 	dh $@
