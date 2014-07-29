@@ -105,6 +105,13 @@ enum {
 int sslconns = 0;
 int totalsslconns = 0;
 
+#ifndef OPENSSL_NO_DH
+static DH *local_dh_1024 = NULL;
+static DH *local_dh_2048 = NULL;
+static DH *local_dh_4096 = NULL;
+static DH *local_dh_8192 = NULL;
+#endif /* OPENSSL_NO_DH */
+
 #ifdef SSL_CTRL_SET_TLSEXT_STATUS_REQ_CB
 struct certificate_ocsp {
 	struct ebmb_node key;
@@ -1034,16 +1041,16 @@ static DH *ssl_get_tmp_dh(SSL *ssl, int export, int keylen)
 	}
 
 	if (keylen >= 8192) {
-		dh = ssl_get_dh_8192();
+		dh = local_dh_8192;
 	}
 	else if (keylen >= 4096) {
-		dh = ssl_get_dh_4096();
+		dh = local_dh_4096;
 	}
 	else if (keylen >= 2048) {
-		dh = ssl_get_dh_2048();
+		dh = local_dh_2048;
 	}
 	else {
-		dh = ssl_get_dh_1024();
+		dh = local_dh_1024;
 	}
 
 	return dh;
@@ -1079,11 +1086,11 @@ int ssl_sock_load_dh_params(SSL_CTX *ctx, const char *file)
 
 		if (global.tune.ssl_default_dh_param <= 1024) {
 			/* we are limited to DH parameter of 1024 bits anyway */
-			dh = ssl_get_dh_1024();
-			if (dh == NULL)
+			local_dh_1024 = ssl_get_dh_1024();
+			if (local_dh_1024 == NULL)
 				goto end;
 
-			SSL_CTX_set_tmp_dh(ctx, dh);
+			SSL_CTX_set_tmp_dh(ctx, local_dh_1024);
 		}
 		else {
 			SSL_CTX_set_tmp_dh_callback(ctx, ssl_get_tmp_dh);
@@ -1593,6 +1600,28 @@ int ssl_sock_prepare_ctx(struct bind_conf *bind_conf, SSL_CTX *ctx, struct proxy
 
 		global.tune.ssl_default_dh_param = 1024;
 	}
+
+#ifndef OPENSSL_NO_DH
+	if (global.tune.ssl_default_dh_param >= 1024) {
+		if (local_dh_1024 == NULL) {
+			local_dh_1024 = ssl_get_dh_1024();
+		}
+		if (global.tune.ssl_default_dh_param >= 2048) {
+			if (local_dh_2048 == NULL) {
+				local_dh_2048 = ssl_get_dh_2048();
+			}
+			if (global.tune.ssl_default_dh_param >= 4096) {
+				if (local_dh_4096 == NULL) {
+					local_dh_4096 = ssl_get_dh_4096();
+				}
+				if (global.tune.ssl_default_dh_param >= 8192 &&
+				    local_dh_8192 == NULL) {
+					local_dh_8192 = ssl_get_dh_8192();
+				}
+			}
+		}
+	}
+#endif /* OPENSSL_NO_DH */
 
 	SSL_CTX_set_info_callback(ctx, ssl_sock_infocbk);
 #if OPENSSL_VERSION_NUMBER >= 0x00907000L
@@ -2654,21 +2683,25 @@ char *ssl_sock_get_version(struct connection *conn)
 	return (char *)SSL_get_version(conn->xprt_ctx);
 }
 
-/* returns common name, NULL terminated, from client certificate, or NULL if none */
-char *ssl_sock_get_common_name(struct connection *conn)
+/* Extract peer certificate's common name into the chunk dest
+ * Returns
+ *  the len of the extracted common name
+ *  or 0 if no CN found in DN
+ *  or -1 on error case (i.e. no peer certificate)
+ */
+int ssl_sock_get_remote_common_name(struct connection *conn, struct chunk *dest)
 {
 	X509 *crt = NULL;
 	X509_NAME *name;
-	struct chunk *cn_trash;
 	const char find_cn[] = "CN";
 	const struct chunk find_cn_chunk = {
 		.str = (char *)&find_cn,
 		.len = sizeof(find_cn)-1
 	};
-	char *result = NULL;
+	int result = -1;
 
 	if (!ssl_sock_is_ssl(conn))
-		return NULL;
+		goto out;
 
 	/* SSL_get_peer_certificate, it increase X509 * ref count */
 	crt = SSL_get_peer_certificate(conn->xprt_ctx);
@@ -2679,13 +2712,8 @@ char *ssl_sock_get_common_name(struct connection *conn)
 	if (!name)
 		goto out;
 
-	cn_trash = get_trash_chunk();
-	if (ssl_sock_get_dn_entry(name, &find_cn_chunk, 1, cn_trash) <= 0)
-		goto out;
-	cn_trash->str[cn_trash->len] = '\0';
-	result = cn_trash->str;
-
-	out:
+	result = ssl_sock_get_dn_entry(name, &find_cn_chunk, 1, dest);
+out:
 	if (crt)
 		X509_free(crt);
 
