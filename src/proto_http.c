@@ -2393,6 +2393,59 @@ fail:
 	return 0;
 }
 
+void http_adjust_conn_mode(struct session *s, struct http_txn *txn, struct http_msg *msg)
+{
+	int tmp = TX_CON_WANT_KAL;
+
+	if (!((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA)) {
+		if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN ||
+		    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN)
+			tmp = TX_CON_WANT_TUN;
+
+		if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
+		    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL)
+			tmp = TX_CON_WANT_TUN;
+	}
+
+	if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_SCL ||
+	    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_SCL) {
+		/* option httpclose + server_close => forceclose */
+		if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
+		    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL)
+			tmp = TX_CON_WANT_CLO;
+		else
+			tmp = TX_CON_WANT_SCL;
+	}
+
+	if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_FCL ||
+	    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_FCL)
+		tmp = TX_CON_WANT_CLO;
+
+	if ((txn->flags & TX_CON_WANT_MSK) < tmp)
+		txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | tmp;
+
+	if (!(txn->flags & TX_HDR_CONN_PRS) &&
+	    (txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_TUN) {
+		/* parse the Connection header and possibly clean it */
+		int to_del = 0;
+		if ((msg->flags & HTTP_MSGF_VER_11) ||
+		    ((txn->flags & TX_CON_WANT_MSK) >= TX_CON_WANT_SCL &&
+		     !((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA)))
+			to_del |= 2; /* remove "keep-alive" */
+		if (!(msg->flags & HTTP_MSGF_VER_11))
+			to_del |= 1; /* remove "close" */
+		http_parse_connection_header(txn, msg, to_del);
+	}
+
+	/* check if client or config asks for explicit close in KAL/SCL */
+	if (((txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_KAL ||
+	     (txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_SCL) &&
+	    ((txn->flags & TX_HDR_CONN_CLO) ||                         /* "connection: close" */
+	     (!(msg->flags & HTTP_MSGF_VER_11) && !(txn->flags & TX_HDR_CONN_KAL)) || /* no "connection: k-a" in 1.0 */
+	     !(msg->flags & HTTP_MSGF_XFER_LEN) ||                     /* no length known => close */
+	     s->fe->state == PR_STSTOPPED))                            /* frontend is stopping */
+		txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | TX_CON_WANT_CLO;
+}
 
 /* This stream analyser waits for a complete HTTP request. It returns 1 if the
  * processing can continue on next analysers, or zero if it either needs more
@@ -2929,58 +2982,8 @@ int http_wait_for_request(struct session *s, struct channel *req, int an_bit)
 	 * time.
 	 */
 	if (!(txn->flags & TX_HDR_CONN_PRS) ||
-	    ((s->fe->options & PR_O_HTTP_MODE) != (s->be->options & PR_O_HTTP_MODE))) {
-		int tmp = TX_CON_WANT_KAL;
-
-		if (!((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA)) {
-			if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN ||
-			    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN)
-				tmp = TX_CON_WANT_TUN;
-
-			if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
-			    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL)
-				tmp = TX_CON_WANT_TUN;
-		}
-
-		if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_SCL ||
-		    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_SCL) {
-			/* option httpclose + server_close => forceclose */
-			if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
-			    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL)
-				tmp = TX_CON_WANT_CLO;
-			else
-				tmp = TX_CON_WANT_SCL;
-		}
-
-		if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_FCL ||
-		    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_FCL)
-			tmp = TX_CON_WANT_CLO;
-
-		if ((txn->flags & TX_CON_WANT_MSK) < tmp)
-			txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | tmp;
-
-		if (!(txn->flags & TX_HDR_CONN_PRS) &&
-		    (txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_TUN) {
-			/* parse the Connection header and possibly clean it */
-			int to_del = 0;
-			if ((msg->flags & HTTP_MSGF_VER_11) ||
-			    ((txn->flags & TX_CON_WANT_MSK) >= TX_CON_WANT_SCL &&
-			     !((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA)))
-				to_del |= 2; /* remove "keep-alive" */
-			if (!(msg->flags & HTTP_MSGF_VER_11))
-				to_del |= 1; /* remove "close" */
-			http_parse_connection_header(txn, msg, to_del);
-		}
-
-		/* check if client or config asks for explicit close in KAL/SCL */
-		if (((txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_KAL ||
-		     (txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_SCL) &&
-		    ((txn->flags & TX_HDR_CONN_CLO) ||                         /* "connection: close" */
-		     (!(msg->flags & HTTP_MSGF_VER_11) && !(txn->flags & TX_HDR_CONN_KAL)) || /* no "connection: k-a" in 1.0 */
-		     !(msg->flags & HTTP_MSGF_XFER_LEN) ||                     /* no length known => close */
-		     s->fe->state == PR_STSTOPPED))                            /* frontend is stopping */
-		    txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | TX_CON_WANT_CLO;
-	}
+	    ((s->fe->options & PR_O_HTTP_MODE) != (s->be->options & PR_O_HTTP_MODE)))
+		http_adjust_conn_mode(s, txn, msg);
 
 	/* end of job, return OK */
 	req->analysers &= ~an_bit;
@@ -6249,7 +6252,7 @@ int http_process_res_common(struct session *s, struct channel *rep, int an_bit, 
 
 		/* add response headers from the rule sets in the same order */
 		list_for_each_entry(wl, &rule_set->rsp_add, list) {
-			if (txn->status < 200)
+			if (txn->status < 200 && txn->status != 101)
 				break;
 			if (wl->cond) {
 				int ret = acl_exec_cond(wl->cond, px, s, txn, SMP_OPT_DIR_RES|SMP_OPT_FINAL);
@@ -6270,7 +6273,7 @@ int http_process_res_common(struct session *s, struct channel *rep, int an_bit, 
 	}
 
 	/* OK that's all we can do for 1xx responses */
-	if (unlikely(txn->status < 200))
+	if (unlikely(txn->status < 200 && txn->status != 101))
 		goto skip_header_mangling;
 
 	/*
@@ -6283,7 +6286,7 @@ int http_process_res_common(struct session *s, struct channel *rep, int an_bit, 
 	/*
 	 * Check for cache-control or pragma headers if required.
 	 */
-	if ((s->be->options & PR_O_CHK_CACHE) || (s->be->ck_opts & PR_CK_NOC))
+	if (((s->be->options & PR_O_CHK_CACHE) || (s->be->ck_opts & PR_CK_NOC)) && txn->status != 101)
 		check_response_for_cacheability(s, rep);
 
 	/*
@@ -6399,9 +6402,11 @@ int http_process_res_common(struct session *s, struct channel *rep, int an_bit, 
 	 * Adjust "Connection: close" or "Connection: keep-alive" if needed.
 	 * If an "Upgrade" token is found, the header is left untouched in order
 	 * not to have to deal with some client bugs : some of them fail an upgrade
-	 * if anything but "Upgrade" is present in the Connection header.
+	 * if anything but "Upgrade" is present in the Connection header. We don't
+	 * want to touch any 101 response either since it's switching to another
+	 * protocol.
 	 */
-	if (!(txn->flags & TX_HDR_CONN_UPG) &&
+	if ((txn->status != 101) && !(txn->flags & TX_HDR_CONN_UPG) &&
 	    (((txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_TUN) ||
 	     ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
 	      (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL))) {
