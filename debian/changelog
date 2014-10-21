@@ -1,3 +1,9 @@
+haproxy (1:1.5.6-1) unstable; urgency=low
+
+  * Upstream release haproxy 1.5.6
+
+ -- vnz <vincent.leraitre@ebuzzing.com>  Tue, 21 Oct 2014 08:43:59 +0200
+
 haproxy (1:1.5.5-2) unstable; urgency=low
 
   * Openssl update
