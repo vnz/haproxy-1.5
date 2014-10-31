@@ -2546,7 +2546,7 @@ int http_wait_for_request(struct session *s, struct channel *req, int an_bit)
 	/* 1: we might have to print this header in debug mode */
 	if (unlikely((global.mode & MODE_DEBUG) &&
 		     (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) &&
-		     (msg->msg_state >= HTTP_MSG_BODY || msg->msg_state == HTTP_MSG_ERROR))) {
+		     msg->msg_state >= HTTP_MSG_BODY)) {
 		char *eol, *sol;
 
 		sol = req->buf->p;
@@ -4893,6 +4893,7 @@ void http_end_txn_clean_session(struct session *s)
 	s->rep->flags &= ~(CF_SHUTR|CF_SHUTR_NOW|CF_READ_ATTACHED|CF_READ_ERROR|CF_READ_NOEXP|CF_STREAMER|CF_STREAMER_FAST|CF_WRITE_PARTIAL|CF_NEVER_WAIT|CF_WROTE_DATA);
 	s->flags &= ~(SN_DIRECT|SN_ASSIGNED|SN_ADDR_SET|SN_BE_ASSIGNED|SN_FORCE_PRST|SN_IGNORE_PRST);
 	s->flags &= ~(SN_CURR_SESS|SN_REDIRECTABLE|SN_SRV_REUSED);
+	s->flags &= ~(SN_ERR_MASK|SN_FINST_MASK|SN_REDISP);
 
 	s->txn.meth = 0;
 	http_reset_txn(s);
@@ -5661,7 +5662,7 @@ int http_wait_for_response(struct session *s, struct channel *rep, int an_bit)
 	/* 1: we might have to print this header in debug mode */
 	if (unlikely((global.mode & MODE_DEBUG) &&
 		     (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) &&
-		     (msg->msg_state >= HTTP_MSG_BODY || msg->msg_state == HTTP_MSG_ERROR))) {
+		     msg->msg_state >= HTTP_MSG_BODY)) {
 		char *eol, *sol;
 
 		sol = rep->buf->p;

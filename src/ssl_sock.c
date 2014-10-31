@@ -56,6 +56,7 @@
 #include <common/standard.h>
 #include <common/ticks.h>
 #include <common/time.h>
+#include <common/cfgparse.h>
 
 #include <ebsttree.h>
 
@@ -1948,10 +1949,15 @@ int ssl_sock_prepare_all_ctx(struct bind_conf *bind_conf, struct proxy *px)
 	if (!bind_conf || !bind_conf->is_ssl)
 		return 0;
 
+	if (bind_conf->default_ctx)
+		err += ssl_sock_prepare_ctx(bind_conf, bind_conf->default_ctx, px);
+
 	node = ebmb_first(&bind_conf->sni_ctx);
 	while (node) {
 		sni = ebmb_entry(node, struct sni_ctx, name);
-		if (!sni->order) /* only initialize the CTX on its first occurrence */
+		if (!sni->order && sni->ctx != bind_conf->default_ctx)
+			/* only initialize the CTX on its first occurrence and
+			   if it is not the default_ctx */
 			err += ssl_sock_prepare_ctx(bind_conf, sni->ctx, px);
 		node = ebmb_next(node);
 	}
@@ -1959,7 +1965,9 @@ int ssl_sock_prepare_all_ctx(struct bind_conf *bind_conf, struct proxy *px)
 	node = ebmb_first(&bind_conf->sni_w_ctx);
 	while (node) {
 		sni = ebmb_entry(node, struct sni_ctx, name);
-		if (!sni->order) /* only initialize the CTX on its first occurrence */
+		if (!sni->order && sni->ctx != bind_conf->default_ctx)
+			/* only initialize the CTX on its first occurrence and
+			   if it is not the default_ctx */
 			err += ssl_sock_prepare_ctx(bind_conf, sni->ctx, px);
 		node = ebmb_next(node);
 	}
@@ -2543,6 +2551,28 @@ ssl_sock_get_serial(X509 *crt, struct chunk *out)
 	return 1;
 }
 
+/* Extract a cert to der, and copy it to a chunk.
+ * Returns 1 if cert is found and copied, 0 on der convertion failure and
+ * -1 if output is not large enough.
+ */
+static int
+ssl_sock_crt2der(X509 *crt, struct chunk *out)
+{
+	int len;
+	unsigned char *p = (unsigned char *)out->str;;
+
+	len =i2d_X509(crt, NULL);
+	if (len <= 0)
+		return 1;
+
+	if (out->size < len)
+		return -1;
+
+	i2d_X509(crt,&p);
+	out->len = len;
+	return 1;
+}
+
 
 /* Copy Date in ASN1_UTCTIME format in struct chunk out.
  * Returns 1 if serial is found and copied, 0 if no valid time found
@@ -2781,6 +2811,54 @@ smp_fetch_ssl_fc_has_crt(struct proxy *px, struct session *l4, void *l7, unsigne
 	smp->data.uint = SSL_SOCK_ST_FL_VERIFY_DONE & conn->xprt_st ? 1 : 0;
 
 	return 1;
+}
+
+/* binary, returns a certificate in a binary chunk (der/raw).
+ * The 5th keyword char is used to know if SSL_get_certificate or SSL_get_peer_certificate
+ * should be use.
+ */
+static int
+smp_fetch_ssl_x_der(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                    const struct arg *args, struct sample *smp, const char *kw)
+{
+	int cert_peer = (kw[4] == 'c') ? 1 : 0;
+	X509 *crt = NULL;
+	int ret = 0;
+	struct chunk *smp_trash;
+	struct connection *conn;
+
+	if (!l4)
+		return 0;
+
+	conn = objt_conn(l4->si[0].end);
+	if (!conn || conn->xprt != &ssl_sock)
+		return 0;
+
+	if (!(conn->flags & CO_FL_CONNECTED)) {
+		smp->flags |= SMP_F_MAY_CHANGE;
+		return 0;
+	}
+
+	if (cert_peer)
+		crt = SSL_get_peer_certificate(conn->xprt_ctx);
+	else
+		crt = SSL_get_certificate(conn->xprt_ctx);
+
+	if (!crt)
+		goto out;
+
+	smp_trash = get_trash_chunk();
+	if (ssl_sock_crt2der(crt, smp_trash) <= 0)
+		goto out;
+
+	smp->data.str = *smp_trash;
+	smp->type = SMP_T_BIN;
+	ret = 1;
+out:
+	/* SSL_get_peer_certificate, it increase X509 * ref count */
+	if (cert_peer && crt)
+		X509_free(crt);
+	return ret;
 }
 
 /* binary, returns serial of certificate in a binary chunk.
@@ -4039,6 +4117,7 @@ static int bind_parse_ssl(char **args, int cur_arg, struct proxy *px, struct bin
 
 	if (global.listen_default_ciphers && !conf->ciphers)
 		conf->ciphers = strdup(global.listen_default_ciphers);
+	conf->ssl_options |= global.listen_default_ssloptions;
 
 	list_for_each_entry(l, &conf->listeners, by_bind)
 		l->xprt = &ssl_sock;
@@ -4103,6 +4182,7 @@ static int srv_parse_check_ssl(char **args, int *cur_arg, struct proxy *px, stru
 	newsrv->check.use_ssl = 1;
 	if (global.connect_default_ciphers && !newsrv->ssl_ctx.ciphers)
 		newsrv->ssl_ctx.ciphers = strdup(global.connect_default_ciphers);
+	newsrv->ssl_ctx.options |= global.connect_default_ssloptions;
 	return 0;
 }
 
@@ -4296,6 +4376,106 @@ static int srv_parse_verifyhost(char **args, int *cur_arg, struct proxy *px, str
 	return 0;
 }
 
+/* parse the "ssl-default-bind-options" keyword in global section */
+static int ssl_parse_default_bind_options(char **args, int section_type, struct proxy *curpx,
+                                          struct proxy *defpx, const char *file, int line,
+                                          char **err) {
+	int i = 1;
+
+	if (*(args[i]) == 0) {
+		memprintf(err, "global statement '%s' expects an option as an argument.", args[0]);
+		return -1;
+	}
+	while (*(args[i])) {
+		if (!strcmp(args[i], "no-sslv3"))
+			global.listen_default_ssloptions |= BC_SSL_O_NO_SSLV3;
+		else if (!strcmp(args[i], "no-tlsv10"))
+			global.listen_default_ssloptions |= BC_SSL_O_NO_TLSV10;
+		else if (!strcmp(args[i], "no-tlsv11"))
+			global.listen_default_ssloptions |= BC_SSL_O_NO_TLSV11;
+		else if (!strcmp(args[i], "no-tlsv12"))
+			global.listen_default_ssloptions |= BC_SSL_O_NO_TLSV12;
+		else if (!strcmp(args[i], "force-sslv3"))
+			global.listen_default_ssloptions |= BC_SSL_O_USE_SSLV3;
+		else if (!strcmp(args[i], "force-tlsv10"))
+			global.listen_default_ssloptions |= BC_SSL_O_USE_TLSV10;
+		else if (!strcmp(args[i], "force-tlsv11")) {
+#if SSL_OP_NO_TLSv1_1
+			global.listen_default_ssloptions |= BC_SSL_O_USE_TLSV11;
+#else
+			memprintf(err, "'%s' '%s': library does not support protocol TLSv1.1", args[0], args[i]);
+			return -1;
+#endif
+		}
+		else if (!strcmp(args[i], "force-tlsv12")) {
+#if SSL_OP_NO_TLSv1_2
+			global.listen_default_ssloptions |= BC_SSL_O_USE_TLSV12;
+#else
+			memprintf(err, "'%s' '%s': library does not support protocol TLSv1.2", args[0], args[i]);
+			return -1;
+#endif
+		}
+		else if (!strcmp(args[i], "no-tls-tickets"))
+			global.listen_default_ssloptions |= BC_SSL_O_NO_TLS_TICKETS;
+		else {
+			memprintf(err, "unknown option '%s' on global statement '%s'.", args[i], args[0]);
+			return -1;
+		}
+		i++;
+	}
+	return 0;
+}
+
+/* parse the "ssl-default-server-options" keyword in global section */
+static int ssl_parse_default_server_options(char **args, int section_type, struct proxy *curpx,
+                                            struct proxy *defpx, const char *file, int line,
+                                            char **err) {
+	int i = 1;
+
+	if (*(args[i]) == 0) {
+		memprintf(err, "global statement '%s' expects an option as an argument.", args[0]);
+		return -1;
+	}
+	while (*(args[i])) {
+		if (!strcmp(args[i], "no-sslv3"))
+			global.connect_default_ssloptions |= SRV_SSL_O_NO_SSLV3;
+		else if (!strcmp(args[i], "no-tlsv10"))
+			global.connect_default_ssloptions |= SRV_SSL_O_NO_TLSV10;
+		else if (!strcmp(args[i], "no-tlsv11"))
+			global.connect_default_ssloptions |= SRV_SSL_O_NO_TLSV11;
+		else if (!strcmp(args[i], "no-tlsv12"))
+			global.connect_default_ssloptions |= SRV_SSL_O_NO_TLSV12;
+		else if (!strcmp(args[i], "force-sslv3"))
+			global.connect_default_ssloptions |= SRV_SSL_O_USE_SSLV3;
+		else if (!strcmp(args[i], "force-tlsv10"))
+			global.connect_default_ssloptions |= SRV_SSL_O_USE_TLSV10;
+		else if (!strcmp(args[i], "force-tlsv11")) {
+#if SSL_OP_NO_TLSv1_1
+			global.connect_default_ssloptions |= SRV_SSL_O_USE_TLSV11;
+#else
+			memprintf(err, "'%s' '%s': library does not support protocol TLSv1.1", args[0], args[i]);
+			return -1;
+#endif
+		}
+		else if (!strcmp(args[i], "force-tlsv12")) {
+#if SSL_OP_NO_TLSv1_2
+			global.connect_default_ssloptions |= SRV_SSL_O_USE_TLSV12;
+#else
+			memprintf(err, "'%s' '%s': library does not support protocol TLSv1.2", args[0], args[i]);
+			return -1;
+#endif
+		}
+		else if (!strcmp(args[i], "no-tls-tickets"))
+			global.connect_default_ssloptions |= SRV_SSL_O_NO_TLS_TICKETS;
+		else {
+			memprintf(err, "unknown option '%s' on global statement '%s'.", args[i], args[0]);
+			return -1;
+		}
+		i++;
+	}
+	return 0;
+}
+
 /* Note: must not be declared <const> as its list will be overwritten.
  * Please take care of keeping this list alphabetically sorted.
  */
@@ -4309,6 +4489,7 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
 	{ "ssl_bc_session_id",      smp_fetch_ssl_fc_session_id,  0,                   NULL,    SMP_T_BIN,  SMP_USE_L5SRV },
 	{ "ssl_c_ca_err",           smp_fetch_ssl_c_ca_err,       0,                   NULL,    SMP_T_UINT, SMP_USE_L5CLI },
 	{ "ssl_c_ca_err_depth",     smp_fetch_ssl_c_ca_err_depth, 0,                   NULL,    SMP_T_UINT, SMP_USE_L5CLI },
+	{ "ssl_c_der",              smp_fetch_ssl_x_der,          0,                   NULL,    SMP_T_BIN,  SMP_USE_L5CLI },
 	{ "ssl_c_err",              smp_fetch_ssl_c_err,          0,                   NULL,    SMP_T_UINT, SMP_USE_L5CLI },
 	{ "ssl_c_i_dn",             smp_fetch_ssl_x_i_dn,         ARG2(0,STR,SINT),    NULL,    SMP_T_STR,  SMP_USE_L5CLI },
 	{ "ssl_c_key_alg",          smp_fetch_ssl_x_key_alg,      0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
@@ -4321,6 +4502,7 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
 	{ "ssl_c_used",             smp_fetch_ssl_c_used,         0,                   NULL,    SMP_T_BOOL, SMP_USE_L5CLI },
 	{ "ssl_c_verify",           smp_fetch_ssl_c_verify,       0,                   NULL,    SMP_T_UINT, SMP_USE_L5CLI },
 	{ "ssl_c_version",          smp_fetch_ssl_x_version,      0,                   NULL,    SMP_T_UINT, SMP_USE_L5CLI },
+	{ "ssl_f_der",              smp_fetch_ssl_x_der,          0,                   NULL,    SMP_T_BIN,  SMP_USE_L5CLI },
 	{ "ssl_f_i_dn",             smp_fetch_ssl_x_i_dn,         ARG2(0,STR,SINT),    NULL,    SMP_T_STR,  SMP_USE_L5CLI },
 	{ "ssl_f_key_alg",          smp_fetch_ssl_x_key_alg,      0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
 	{ "ssl_f_notafter",         smp_fetch_ssl_x_notafter,     0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
@@ -4421,6 +4603,12 @@ static struct srv_kw_list srv_kws = { "SSL", { }, {
 	{ NULL, NULL, 0, 0 },
 }};
 
+static struct cfg_kw_list cfg_kws = {ILH, {
+	{ CFG_GLOBAL, "ssl-default-bind-options", ssl_parse_default_bind_options },
+	{ CFG_GLOBAL, "ssl-default-server-options", ssl_parse_default_server_options },
+	{ 0, NULL, NULL },
+}};
+
 /* transport-layer operations for SSL sockets */
 struct xprt_ops ssl_sock = {
 	.snd_buf  = ssl_sock_from_buf,
@@ -4448,6 +4636,8 @@ static void __ssl_sock_init(void)
 		global.listen_default_ciphers = strdup(global.listen_default_ciphers);
 	if (global.connect_default_ciphers)
 		global.connect_default_ciphers = strdup(global.connect_default_ciphers);
+	global.listen_default_ssloptions = BC_SSL_O_NONE;
+	global.connect_default_ssloptions = SRV_SSL_O_NONE;
 
 	SSL_library_init();
 	cm = SSL_COMP_get_compression_methods();
@@ -4456,6 +4646,7 @@ static void __ssl_sock_init(void)
 	acl_register_keywords(&acl_kws);
 	bind_register_keywords(&bind_kws);
 	srv_register_keywords(&srv_kws);
+	cfg_register_keywords(&cfg_kws);
 }
 
 /*
