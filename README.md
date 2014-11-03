@@ -8,9 +8,11 @@ Build haproxy package
 Upstream update
 ===============
 
-* git-import-orig path/to/haproxy\_1.5.1.orig.tar.gz
-* dch -v "1:1.5.1-1" -M -D unstable "Upstream release haproxy 1.5.1"
-* commit now
-* git tag 1.5.1-1
+* debian/rules clean
+* git-import-orig path/to/haproxy\_1.5.x.orig.tar.gz
+* dch -v '1:1.5.x-1' -M -D unstable 'Upstream release haproxy 1.5.x'
+* git add .
+* git commit -m 'Upstream release haproxy 1.5.x'
+* git tag 1.5.x-1
 
 
