@@ -1812,7 +1812,7 @@ int ssl_sock_prepare_srv_ctx(struct server *srv, struct proxy *curproxy)
 	if (srv->use_ssl)
 		srv->xprt = &ssl_sock;
 	if (srv->check.use_ssl)
-		srv->check_common.xprt = &ssl_sock;
+		srv->check.xprt = &ssl_sock;
 
 	srv->ssl_ctx.ctx = SSL_CTX_new(SSLv23_client_method());
 	if (!srv->ssl_ctx.ctx) {
@@ -2033,22 +2033,51 @@ static int ssl_sock_init(struct connection *conn)
 	/* If it is in client mode initiate SSL session
 	   in connect state otherwise accept state */
 	if (objt_server(conn->target)) {
+		int may_retry = 1;
+
+	retry_connect:
 		/* Alloc a new SSL session ctx */
 		conn->xprt_ctx = SSL_new(objt_server(conn->target)->ssl_ctx.ctx);
 		if (!conn->xprt_ctx) {
+			if (may_retry--) {
+				pool_gc2();
+				goto retry_connect;
+			}
+			conn->err_code = CO_ER_SSL_NO_MEM;
+			return -1;
+		}
+
+		/* set fd on SSL session context */
+		if (!SSL_set_fd(conn->xprt_ctx, conn->t.sock.fd)) {
+			SSL_free(conn->xprt_ctx);
+			conn->xprt_ctx = NULL;
+			if (may_retry--) {
+				pool_gc2();
+				goto retry_connect;
+			}
+			conn->err_code = CO_ER_SSL_NO_MEM;
+			return -1;
+		}
+
+		/* set connection pointer */
+		if (!SSL_set_app_data(conn->xprt_ctx, conn)) {
+			SSL_free(conn->xprt_ctx);
+			conn->xprt_ctx = NULL;
+			if (may_retry--) {
+				pool_gc2();
+				goto retry_connect;
+			}
 			conn->err_code = CO_ER_SSL_NO_MEM;
 			return -1;
 		}
 
 		SSL_set_connect_state(conn->xprt_ctx);
-		if (objt_server(conn->target)->ssl_ctx.reused_sess)
-			SSL_set_session(conn->xprt_ctx, objt_server(conn->target)->ssl_ctx.reused_sess);
-
-		/* set fd on SSL session context */
-		SSL_set_fd(conn->xprt_ctx, conn->t.sock.fd);
-
-		/* set connection pointer */
-		SSL_set_app_data(conn->xprt_ctx, conn);
+		if (objt_server(conn->target)->ssl_ctx.reused_sess) {
+			if(!SSL_set_session(conn->xprt_ctx, objt_server(conn->target)->ssl_ctx.reused_sess)) {
+				SSL_SESSION_free(objt_server(conn->target)->ssl_ctx.reused_sess);
+				objt_server(conn->target)->ssl_ctx.reused_sess = NULL;
+			}
+		}
 
 		/* leave init state and start handshake */
 		conn->flags |= CO_FL_SSL_WAIT_HS | CO_FL_WAIT_L6_CONN;
@@ -2058,20 +2087,45 @@ static int ssl_sock_init(struct connection *conn)
 		return 0;
 	}
 	else if (objt_listener(conn->target)) {
+		int may_retry = 1;
+
+	retry_accept:
 		/* Alloc a new SSL session ctx */
 		conn->xprt_ctx = SSL_new(objt_listener(conn->target)->bind_conf->default_ctx);
 		if (!conn->xprt_ctx) {
+			if (may_retry--) {
+				pool_gc2();
+				goto retry_accept;
+			}
+			conn->err_code = CO_ER_SSL_NO_MEM;
+			return -1;
+		}
+
+		/* set fd on SSL session context */
+		if (!SSL_set_fd(conn->xprt_ctx, conn->t.sock.fd)) {
+			SSL_free(conn->xprt_ctx);
+			conn->xprt_ctx = NULL;
+			if (may_retry--) {
+				pool_gc2();
+				goto retry_accept;
+			}
+			conn->err_code = CO_ER_SSL_NO_MEM;
+			return -1;
+		}
+
+		/* set connection pointer */
+		if (!SSL_set_app_data(conn->xprt_ctx, conn)) {
+			SSL_free(conn->xprt_ctx);
+			conn->xprt_ctx = NULL;
+			if (may_retry--) {
+				pool_gc2();
+				goto retry_accept;
+			}
 			conn->err_code = CO_ER_SSL_NO_MEM;
 			return -1;
 		}
 
 		SSL_set_accept_state(conn->xprt_ctx);
-
-		/* set fd on SSL session context */
-		SSL_set_fd(conn->xprt_ctx, conn->t.sock.fd);
-
-		/* set connection pointer */
-		SSL_set_app_data(conn->xprt_ctx, conn);
 
 		/* leave init state and start handshake */
 		conn->flags |= CO_FL_SSL_WAIT_HS | CO_FL_WAIT_L6_CONN;
