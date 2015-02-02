@@ -731,7 +731,7 @@ int http_remove_header2(struct http_msg *msg, struct hdr_idx *idx, struct hdr_ct
 		if (idx->tail == ctx->idx)
 			idx->tail = ctx->prev;
 		ctx->idx = ctx->prev;    /* walk back to the end of previous header */
-		ctx->line -= idx->v[ctx->idx].len + idx->v[cur_idx].cr + 1;
+		ctx->line -= idx->v[ctx->idx].len + idx->v[ctx->idx].cr + 1;
 		ctx->val = idx->v[ctx->idx].len; /* point to end of previous header */
 		ctx->tws = ctx->vlen = 0;
 		return ctx->idx;
@@ -3250,7 +3250,7 @@ static int http_transform_header(struct session* s, struct http_msg *msg, const 
 	while (http_find_full_header2(name, name_len, buf, idx, ctx)) {
 		struct hdr_idx_elem *hdr = idx->v + ctx->idx;
 		int delta;
-		char* val = (char*)ctx->line + name_len + 2;
+		char* val = (char*)ctx->line + ctx->val;
 		char* val_end = (char*)ctx->line + hdr->len;
 		char* reg_dst_buf;
 		uint reg_dst_buf_size;
@@ -3389,17 +3389,15 @@ http_req_get_intercept_rule(struct proxy *px, struct list *rules, struct session
 			break;
 
 		case HTTP_REQ_ACT_DEL_HDR:
-		case HTTP_REQ_ACT_SET_HDR:
 			ctx.idx = 0;
 			/* remove all occurrences of the header */
 			while (http_find_header2(rule->arg.hdr_add.name, rule->arg.hdr_add.name_len,
 						 txn->req.chn->buf->p, &txn->hdr_idx, &ctx)) {
 				http_remove_header2(&txn->req, &txn->hdr_idx, &ctx);
 			}
-			if (rule->action == HTTP_REQ_ACT_DEL_HDR)
-				break;
-			/* now fall through to header addition */
+			break;
 
+		case HTTP_REQ_ACT_SET_HDR:
 		case HTTP_REQ_ACT_ADD_HDR:
 			chunk_printf(&trash, "%s: ", rule->arg.hdr_add.name);
 			memcpy(trash.str, rule->arg.hdr_add.name, rule->arg.hdr_add.name_len);
@@ -3407,6 +3405,16 @@ http_req_get_intercept_rule(struct proxy *px, struct list *rules, struct session
 			trash.str[trash.len++] = ':';
 			trash.str[trash.len++] = ' ';
 			trash.len += build_logline(s, trash.str + trash.len, trash.size - trash.len, &rule->arg.hdr_add.fmt);
+
+			if (rule->action == HTTP_REQ_ACT_SET_HDR) {
+				/* remove all occurrences of the header */
+				ctx.idx = 0;
+				while (http_find_header2(rule->arg.hdr_add.name, rule->arg.hdr_add.name_len,
+							 txn->req.chn->buf->p, &txn->hdr_idx, &ctx)) {
+					http_remove_header2(&txn->req, &txn->hdr_idx, &ctx);
+				}
+			}
+
 			http_header_add_tail2(&txn->req, &txn->hdr_idx, trash.str, trash.len);
 			break;
 
@@ -3578,17 +3586,15 @@ http_res_get_intercept_rule(struct proxy *px, struct list *rules, struct session
 			break;
 
 		case HTTP_RES_ACT_DEL_HDR:
-		case HTTP_RES_ACT_SET_HDR:
 			ctx.idx = 0;
 			/* remove all occurrences of the header */
 			while (http_find_header2(rule->arg.hdr_add.name, rule->arg.hdr_add.name_len,
 						 txn->rsp.chn->buf->p, &txn->hdr_idx, &ctx)) {
 				http_remove_header2(&txn->rsp, &txn->hdr_idx, &ctx);
 			}
-			if (rule->action == HTTP_RES_ACT_DEL_HDR)
-				break;
-			/* now fall through to header addition */
+			break;
 
+		case HTTP_RES_ACT_SET_HDR:
 		case HTTP_RES_ACT_ADD_HDR:
 			chunk_printf(&trash, "%s: ", rule->arg.hdr_add.name);
 			memcpy(trash.str, rule->arg.hdr_add.name, rule->arg.hdr_add.name_len);
@@ -3596,6 +3602,15 @@ http_res_get_intercept_rule(struct proxy *px, struct list *rules, struct session
 			trash.str[trash.len++] = ':';
 			trash.str[trash.len++] = ' ';
 			trash.len += build_logline(s, trash.str + trash.len, trash.size - trash.len, &rule->arg.hdr_add.fmt);
+
+			if (rule->action == HTTP_RES_ACT_SET_HDR) {
+				/* remove all occurrences of the header */
+				ctx.idx = 0;
+				while (http_find_header2(rule->arg.hdr_add.name, rule->arg.hdr_add.name_len,
+							 txn->rsp.chn->buf->p, &txn->hdr_idx, &ctx)) {
+					http_remove_header2(&txn->rsp, &txn->hdr_idx, &ctx);
+				}
+			}
 			http_header_add_tail2(&txn->rsp, &txn->hdr_idx, trash.str, trash.len);
 			break;
 
@@ -7045,7 +7060,8 @@ int apply_filters_to_request(struct session *s, struct channel *req, struct prox
 			/* The filter did not match the request, it can be
 			 * iterated through all headers.
 			 */
-			apply_filter_to_req_headers(s, req, exp);
+			if (unlikely(apply_filter_to_req_headers(s, req, exp) < 0))
+				return -1;
 		}
 	}
 	return 0;

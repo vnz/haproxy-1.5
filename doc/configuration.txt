@@ -2,9 +2,9 @@
                                 HAProxy
                           Configuration Manual
                          ----------------------
-                             version 1.5.10
+                             version 1.5.11
                              willy tarreau
-                              2014/12/31
+                               2015/02/01
 
 
 This document covers the configuration language as implemented in the version
@@ -1323,6 +1323,7 @@ http-send-name-header                     -          -         X         X
 id                                        -          X         X         X
 ignore-persist                            -          X         X         X
 log                                  (*)  X          X         X         X
+log-format                                X          X         X         -
 max-keep-alive-queue                      X          -         X         X
 maxconn                                   X          X         X         -
 mode                                      X          X         X         X
@@ -2855,6 +2856,10 @@ http-check expect [!] <match> <pattern>
   waste some CPU cycles, especially when regular expressions are used, and that
   it is always better to focus the checks on smaller resources.
 
+  Also "http-check expect" doesn't support HTTP keep-alive. Keep in mind that it
+  will automatically append a "Connection: close" header, meaning that this
+  header should not be present in the request provided by "option httpchk".
+
   Last, if "http-check expect" is combined with "http-check disable-on-404",
   then this last one has precedence when the server responds with 404.
 
@@ -2983,7 +2988,8 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
     - "set-header" does the same as "add-header" except that the header name
       is first removed if it existed. This is useful when passing security
       information to the server, where the header must not be manipulated by
-      external users.
+      external users. Note that the new value is computed before the removal so
+      it is possible to concatenate a value to an existing header.
 
     - "del-header" removes all HTTP header fields whose name is specified in
       <name>.
@@ -3475,9 +3481,15 @@ no log
 
 
 log-format <string>
-   Allows you to custom a log line.
+  Specifies the log format string to use for traffic logs
+  May be used in sections:    defaults | frontend | listen | backend
+                                 yes   |    yes   |   yes  |    no
 
-   See also : Custom Log Format (8.2.4)
+  This directive specifies the log format string that will be used for all logs
+  resulting from traffic passing through the frontend using this line. If the
+  directive is used in a defaults section, all subsequent frontends will use
+  the same log format. Please see section 8.2.4 which covers the log format
+  string in depth.
 
 
 max-keep-alive-queue <value>
@@ -8315,20 +8327,21 @@ crt <cert>
   are loaded.
 
   If a directory name is used instead of a PEM file, then all files found in
-  that directory will be loaded unless their name ends with '.issuer' or
-  '.ocsp' (reserved extensions). This directive may be specified multiple times
-  in order to load certificates from multiple files or directories. The
-  certificates will be presented to clients who provide a valid TLS Server Name
-  Indication field matching one of their CN or alt subjects. Wildcards are
-  supported, where a wildcard character '*' is used instead of the first
-  hostname component (eg: *.example.org matches www.example.org but not
+  that directory will be loaded in alphabetic order unless their name ends with
+  '.issuer' or '.ocsp' (reserved extensions). This directive may be specified
+  multiple times in order to load certificates from multiple files or
+  directories. The certificates will be presented to clients who provide a valid
+  TLS Server Name Indication field matching one of their CN or alt subjects.
+  Wildcards are supported, where a wildcard character '*' is used instead of the
+  first hostname component (eg: *.example.org matches www.example.org but not
   www.sub.example.org).
 
   If no SNI is provided by the client or if the SSL library does not support
   TLS extensions, or if the client provides an SNI hostname which does not
   match any certificate, then the first loaded certificate will be presented.
   This means that when loading certificates from a directory, it is highly
-  recommended to load the default one first as a file.
+  recommended to load the default one first as a file or to ensure that it will
+  always be the first one in the directory.
 
   Note that the same cert may be loaded multiple times without side effects.
 
