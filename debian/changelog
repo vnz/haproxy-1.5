@@ -1,3 +1,9 @@
+haproxy (1:1.5.12-1) unstable; urgency=low
+
+  * Upstream release haproxy 1.5.12
+
+ -- vnz <vincent.leraitre@ebuzzing.com>  Mon, 11 May 2015 08:15:54 +0200
+
 haproxy (1:1.5.11-1) unstable; urgency=low
 
   * Upstream release haproxy 1.5.11
