@@ -1063,6 +1063,7 @@ static void peer_session_forceshutdown(struct session * session)
 {
 	struct stream_interface *oldsi = NULL;
 	struct appctx *appctx = NULL;
+	struct peer_session *ps;
 	int i;
 
 	for (i = 0; i <= 1; i++) {
@@ -1078,6 +1079,14 @@ static void peer_session_forceshutdown(struct session * session)
 
 	if (!appctx)
 		return;
+
+	ps = (struct peer_session *)appctx->ctx.peers.ptr;
+	/* we're killing a connection, we must apply a random delay before
+	 * retrying otherwise the other end will do the same and we can loop
+	 * for a while.
+	 */
+	if (ps)
+		ps->reconnect = tick_add(now_ms, MS_TO_TICKS(50 + random() % 2000));
 
 	/* call release to reinit resync states if needed */
 	peer_session_release(oldsi);
@@ -1328,6 +1337,15 @@ static struct task *process_peer_sync(struct task * task)
 
 	task->expire = TICK_ETERNITY;
 
+	if (!st->sessions->peer->peers->peers_fe) {
+		/* this one was never started, kill it */
+		signal_unregister_handler(st->sighandler);
+		st->table->sync_task = NULL;
+		task_delete(st->sync_task);
+		task_free(st->sync_task);
+		return NULL;
+	}
+
 	if (!stopping) {
 		/* Normal case (not soft stop)*/
 		if (((st->flags & SHTABLE_RESYNC_STATEMASK) == SHTABLE_RESYNC_FROMLOCAL) &&
@@ -1352,8 +1370,8 @@ static struct task *process_peer_sync(struct task * task)
 				if (!ps->session) {
 					/* no active session */
 					if (ps->statuscode == 0 ||
-					    ps->statuscode == PEER_SESS_SC_SUCCESSCODE ||
 					    ((ps->statuscode == PEER_SESS_SC_CONNECTCODE ||
+					      ps->statuscode == PEER_SESS_SC_SUCCESSCODE ||
 					      ps->statuscode == PEER_SESS_SC_CONNECTEDCODE) &&
 					     tick_is_expired(ps->reconnect, now_ms))) {
 						/* connection never tried
@@ -1364,8 +1382,7 @@ static struct task *process_peer_sync(struct task * task)
 						/* retry a connect */
 						ps->session = peer_session_create(ps->peer, ps);
 					}
-					else if (ps->statuscode == PEER_SESS_SC_CONNECTCODE ||
-						 ps->statuscode == PEER_SESS_SC_CONNECTEDCODE) {
+					else if (!tick_is_expired(ps->reconnect, now_ms)) {
 						/* If previous session failed during connection
 						 * but reconnection timer is not expired */
 
@@ -1516,8 +1533,8 @@ void peers_register_table(struct peers *peers, struct stktable *table)
 	st->sync_task->process = process_peer_sync;
 	st->sync_task->expire = TICK_ETERNITY;
 	st->sync_task->context = (void *)st;
-	table->sync_task =st->sync_task;
-	signal_register_task(0, table->sync_task, 0);
+	table->sync_task = st->sync_task;
+	st->sighandler = signal_register_task(0, table->sync_task, 0);
 	task_wakeup(st->sync_task, TASK_WOKEN_INIT);
 }
 

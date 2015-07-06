@@ -1841,6 +1841,7 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 				curpeers->peers_fe->options2 |= PR_O2_INDEPSTR | PR_O2_SMARTCON | PR_O2_SMARTACC;
 				curpeers->peers_fe->conf.args.file = curpeers->peers_fe->conf.file = strdup(file);
 				curpeers->peers_fe->conf.args.line = curpeers->peers_fe->conf.line = linenum;
+				curpeers->peers_fe->bind_proc = 0; /* will be filled by users */
 
 				bind_conf = bind_conf_alloc(&curpeers->peers_fe->conf.bind, file, linenum, args[2]);
 
@@ -3792,7 +3793,7 @@ stats_error_parsing:
 					curproxy->options2 |= PR_O2_CLFLOG;
 					logformat = clf_http_log_format;
 				} else {
-					Alert("parsing [%s:%d] : keyword '%s' only supports option 'clf'.\n", file, linenum, args[2]);
+					Alert("parsing [%s:%d] : keyword '%s' only supports option 'clf'.\n", file, linenum, args[1]);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
@@ -4362,18 +4363,16 @@ stats_error_parsing:
 			const char *ptr_arg;
 			int cur_arg;
 			struct tcpcheck_rule *tcpcheck;
-			struct list *l;
 
 			/* check if first rule is also a 'connect' action */
-			l = (struct list *)&curproxy->tcpcheck_rules;
-			if (l->p != l->n) {
-				tcpcheck = (struct tcpcheck_rule *)l->n;
-				if (tcpcheck && tcpcheck->action != TCPCHK_ACT_CONNECT) {
-					Alert("parsing [%s:%d] : first step MUST also be a 'connect' when there is a 'connect' step in the tcp-check ruleset.\n",
-					      file, linenum);
-					err_code |= ERR_ALERT | ERR_FATAL;
-					goto out;
-				}
+			tcpcheck = LIST_NEXT(&curproxy->tcpcheck_rules, struct tcpcheck_rule *, list);
+
+			if (&tcpcheck->list != &curproxy->tcpcheck_rules
+			    && tcpcheck->action != TCPCHK_ACT_CONNECT) {
+				Alert("parsing [%s:%d] : first step MUST also be a 'connect' when there is a 'connect' step in the tcp-check ruleset.\n",
+				      file, linenum);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
 			}
 
 			cur_arg = 2;
@@ -5670,6 +5669,9 @@ cfg_parse_users(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
+		if (!userlist)
+			goto out;
+
 		for (ag = userlist->groups; ag; ag = ag->next)
 			if (!strcmp(ag->name, args[1])) {
 				Warning("parsing [%s:%d]: ignoring duplicated group '%s' in userlist '%s'.\n",
@@ -5720,6 +5722,8 @@ cfg_parse_users(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
+		if (!userlist)
+			goto out;
 
 		for (newuser = userlist->users; newuser; newuser = newuser->next)
 			if (!strcmp(newuser->user, args[1])) {
@@ -6126,7 +6130,7 @@ int check_config_validity()
 			/* an explicit bind-process was specified, let's check how many
 			 * processes remain.
 			 */
-			nbproc = popcount(curproxy->bind_proc);
+			nbproc = my_popcountl(curproxy->bind_proc);
 
 			curproxy->bind_proc &= nbits(global.nbproc);
 			if (!curproxy->bind_proc && nbproc == 1) {
@@ -6151,7 +6155,7 @@ int check_config_validity()
 				mask &= curproxy->bind_proc;
 			/* mask cannot be null here thanks to the previous checks */
 
-			nbproc = popcount(bind_conf->bind_proc);
+			nbproc = my_popcountl(bind_conf->bind_proc);
 			bind_conf->bind_proc &= mask;
 
 			if (!bind_conf->bind_proc && nbproc == 1) {
@@ -6164,12 +6168,6 @@ int check_config_validity()
 					curproxy->id, bind_conf->arg, bind_conf->file, bind_conf->line);
 				bind_conf->bind_proc = 0;
 			}
-		}
-
-		if (global.nbproc > 1 && curproxy->table.peers.name) {
-			Alert("Proxy '%s': peers can't be used in multi-process mode (nbproc > 1).\n",
-			      curproxy->id);
-			cfgerr++;
 		}
 
 		switch (curproxy->mode) {
@@ -7094,7 +7092,7 @@ out_uri_auth_compat:
 				mask &= bind_conf->bind_proc;
 
 			/* stop here if more than one process is used */
-			if (popcount(mask) > 1)
+			if (my_popcountl(mask) > 1)
 				break;
 		}
 		if (&bind_conf->by_fe != &global.stats_fe->conf.bind) {
@@ -7110,23 +7108,23 @@ out_uri_auth_compat:
 		list_for_each_entry(bind_conf, &curproxy->conf.bind, by_fe) {
 			unsigned long mask;
 
-			mask = bind_conf->bind_proc ? bind_conf->bind_proc : ~0UL;
+			mask = bind_conf->bind_proc ? bind_conf->bind_proc : nbits(global.nbproc);
 			curproxy->bind_proc |= mask;
 		}
 
 		if (!curproxy->bind_proc)
-			curproxy->bind_proc = ~0UL;
+			curproxy->bind_proc = nbits(global.nbproc);
 	}
 
 	if (global.stats_fe) {
 		list_for_each_entry(bind_conf, &global.stats_fe->conf.bind, by_fe) {
 			unsigned long mask;
 
-			mask = bind_conf->bind_proc ? bind_conf->bind_proc : ~0UL;
+			mask = bind_conf->bind_proc ? bind_conf->bind_proc : nbits(global.nbproc);
 			global.stats_fe->bind_proc |= mask;
 		}
 		if (!global.stats_fe->bind_proc)
-			global.stats_fe->bind_proc = ~0UL;
+			global.stats_fe->bind_proc = nbits(global.nbproc);
 	}
 
 	/* propagate bindings from frontends to backends. Don't do it if there
@@ -7143,7 +7141,7 @@ out_uri_auth_compat:
 	for (curproxy = proxy; curproxy; curproxy = curproxy->next) {
 		if (curproxy->bind_proc)
 			continue;
-		curproxy->bind_proc = ~0UL;
+		curproxy->bind_proc = nbits(global.nbproc);
 	}
 
 	/*******************************************************/
@@ -7157,7 +7155,7 @@ out_uri_auth_compat:
 		unsigned int next_id;
 		int nbproc;
 
-		nbproc = popcount(curproxy->bind_proc & nbits(global.nbproc));
+		nbproc = my_popcountl(curproxy->bind_proc & nbits(global.nbproc));
 
 #ifdef USE_OPENSSL
 		/* Configure SSL for each bind line.
@@ -7274,7 +7272,7 @@ out_uri_auth_compat:
 				int count, maxproc = 0;
 
 				list_for_each_entry(bind_conf, &curproxy->conf.bind, by_fe) {
-					count = popcount(bind_conf->bind_proc);
+					count = my_popcountl(bind_conf->bind_proc);
 					if (count > maxproc)
 						maxproc = count;
 				}
@@ -7396,13 +7394,18 @@ out_uri_auth_compat:
 				global.last_checks |= cfg_opts2[optnum].checks;
 	}
 
+	/* compute the required process bindings for the peers */
+	for (curproxy = proxy; curproxy; curproxy = curproxy->next)
+		if (curproxy->table.peers.p)
+			curproxy->table.peers.p->peers_fe->bind_proc |= curproxy->bind_proc;
+
 	if (peers) {
 		struct peers *curpeers = peers, **last;
 		struct peer *p, *pb;
 
-		/* Remove all peers sections which don't have a valid listener.
-		 * This can happen when a peers section is never referenced and
-		 * does not contain a local peer.
+		/* Remove all peers sections which don't have a valid listener,
+		 * which are not used by any table, or which are bound to more
+		 * than one process.
 		 */
 		last = &peers;
 		while (*last) {
@@ -7417,6 +7420,18 @@ out_uri_auth_compat:
 			else if (!curpeers->peers_fe) {
 				Warning("Removing incomplete section 'peers %s' (no peer named '%s').\n",
 					curpeers->id, localpeer);
+			}
+			else if (my_popcountl(curpeers->peers_fe->bind_proc) != 1) {
+				/* either it's totally stopped or too much used */
+				if (curpeers->peers_fe->bind_proc) {
+					Alert("Peers section '%s': peers referenced by sections "
+					      "running in different processes (%d different ones). "
+					      "Check global.nbproc and all tables' bind-process "
+					      "settings.\n", curpeers->id, my_popcountl(curpeers->peers_fe->bind_proc));
+					cfgerr++;
+				}
+				stop_proxy(curpeers->peers_fe);
+				curpeers->peers_fe = NULL;
 			}
 			else {
 				last = &curpeers->next;
