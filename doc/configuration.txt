@@ -2,9 +2,9 @@
                                 HAProxy
                           Configuration Manual
                          ----------------------
-                             version 1.5.14
+                             version 1.5.15
                              willy tarreau
-                               2015/07/02
+                               2015/11/01
 
 
 This document covers the configuration language as implemented in the version
@@ -1367,10 +1367,11 @@ option log-health-checks             (*)  X          -         X         X
 option log-separate-errors           (*)  X          X         X         -
 option logasap                       (*)  X          X         X         -
 option mysql-check                        X          -         X         X
-option pgsql-check                        X          -         X         X
 option nolinger                      (*)  X          X         X         X
 option originalto                         X          X         X         X
 option persist                       (*)  X          -         X         X
+option pgsql-check                        X          -         X         X
+option prefer-last-server            (*)  X          -         X         X
 option redispatch                    (*)  X          -         X         X
 option redis-check                        X          -         X         X
 option smtpchk                            X          -         X         X
@@ -1419,18 +1420,18 @@ rsprep                                    -          X         X         X
 server                                    -          -         X         X
 source                                    X          -         X         X
 srvtimeout                  (deprecated)  X          -         X         X
-stats admin                               -          -         X         X
-stats auth                                X          -         X         X
-stats enable                              X          -         X         X
-stats hide-version                        X          -         X         X
-stats http-request                        -          -         X         X
-stats realm                               X          -         X         X
-stats refresh                             X          -         X         X
-stats scope                               X          -         X         X
-stats show-desc                           X          -         X         X
-stats show-legends                        X          -         X         X
-stats show-node                           X          -         X         X
-stats uri                                 X          -         X         X
+stats admin                               -          X         X         X
+stats auth                                X          X         X         X
+stats enable                              X          X         X         X
+stats hide-version                        X          X         X         X
+stats http-request                        -          X         X         X
+stats realm                               X          X         X         X
+stats refresh                             X          X         X         X
+stats scope                               X          X         X         X
+stats show-desc                           X          X         X         X
+stats show-legends                        X          X         X         X
+stats show-node                           X          X         X         X
+stats uri                                 X          X         X         X
 -- keyword -------------------------- defaults - frontend - listen -- backend -
 stick match                               -          -         X         X
 stick on                                  -          -         X         X
@@ -1888,6 +1889,12 @@ bind /<path> [, ...] [param*]
         listen external_bind_app1
             bind fd@${FD_APP1}
 
+  Note: regarding Linux's abstract namespace sockets, HAProxy uses the whole
+        sun_path length is used for the address length. Some other programs
+        such as socat use the string length only by default. Pass the option
+        ",unix-tightsocklen=0" to any abstract socket definition in socat to
+        make it compatible with HAProxy's.
+
   See also : "source", "option forwardfor", "unix-bind" and the PROXY protocol
              documentation, and section 5 about bind options.
 
@@ -2055,7 +2062,7 @@ capture request header <name> len <length>
   Example:
         capture request header Host len 15
         capture request header X-Forwarded-For len 15
-        capture request header Referrer len 15
+        capture request header Referer len 15
 
   See also : "capture cookie", "capture response header" as well as section 8
              about logging.
@@ -3135,7 +3142,7 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
   Example:
         http-request set-header X-Haproxy-Current-Date %T
         http-request set-header X-SSL                  %[ssl_fc]
-        http-request set-header X-SSL-Session_ID       %[ssl_fc_session_id]
+        http-request set-header X-SSL-Session_ID       %[ssl_fc_session_id,hex]
         http-request set-header X-SSL-Client-Verify    %[ssl_c_verify]
         http-request set-header X-SSL-Client-DN        %{+Q}[ssl_c_s_dn]
         http-request set-header X-SSL-Client-CN        %{+Q}[ssl_c_s_dn(cn)]
@@ -5443,7 +5450,7 @@ redirect scheme   <sch> [code <code>] <option> [{if | unless} <condition>]
               is desired. Only codes 301, 302, 303, 307 and 308 are supported,
               with 302 used by default if no code is specified. 301 means
               "Moved permanently", and a browser may cache the Location. 302
-              means "Moved permanently" and means that the browser should not
+              means "Moved temporarily" and means that the browser should not
               cache the redirection. 303 is equivalent to 302 except that the
               browser will fetch the location with a GET method. 307 is just
               like 302 but makes it clear that the same method must be reused.
@@ -5996,6 +6003,12 @@ server <name> <address>[:[port]] [param*]
         server www1_dc1 ${LAN_DC1}.101:80
         server www1_dc2 ${LAN_DC2}.101:80
 
+  Note: regarding Linux's abstract namespace sockets, HAProxy uses the whole
+        sun_path length is used for the address length. Some other programs
+        such as socat use the string length only by default. Pass the option
+        ",unix-tightsocklen=0" to any abstract socket definition in socat to
+        make it compatible with HAProxy's.
+
   See also: "default-server", "http-send-name-header" and section 5 about
              server options
 
@@ -6116,6 +6129,8 @@ source <addr>[:<port>] [interface <name>]
   also be specified in a "defaults" section. Finer source address specification
   is possible at the server level using the "source" server option. Refer to
   section 5 for more information.
+
+  In order to work, "usesrc" requires root privileges.
 
   Examples :
         backend private
@@ -12379,7 +12394,7 @@ Please refer to the table below for currently defined variables :
   |   | %hrl | captured_request_headers CLF style            | string list |
   |   | %hs  | captured_response_headers default style       | string      |
   |   | %hsl | captured_response_headers CLF style           | string list |
-  |   | %ms  | accept date milliseconds                      | numeric     |
+  |   | %ms  | accept date milliseconds (left-padded with 0) | numeric     |
   |   | %pid | PID                                           | numeric     |
   | H | %r   | http_request                                  | string      |
   |   | %rc  | retries                                       | numeric     |
