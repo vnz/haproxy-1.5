@@ -887,6 +887,7 @@ static int sess_update_st_cer(struct session *s, struct stream_interface *si)
 	 */
 	if (objt_server(s->target) &&
 	    (si->conn_retries == 0 ||
+	     (__objt_server(s->target)->state < SRV_ST_RUNNING) ||
 	     (!(s->flags & SN_DIRECT) && s->be->srv_act > 1 &&
 	      ((s->be->lbprm.algo & BE_LB_KIND) == BE_LB_KIND_RR))) &&
 	    s->be->options & PR_O_REDISP && !(s->flags & SN_FORCE_PRST)) {
@@ -1706,8 +1707,11 @@ struct task *process_session(struct task *t)
 		      (CF_SHUTR|CF_READ_ACTIVITY|CF_READ_TIMEOUT|CF_SHUTW|
 		       CF_WRITE_ACTIVITY|CF_WRITE_TIMEOUT|CF_ANA_TIMEOUT)) &&
 		    !((s->si[0].flags | s->si[1].flags) & (SI_FL_EXP|SI_FL_ERR)) &&
-		    ((t->state & TASK_WOKEN_ANY) == TASK_WOKEN_TIMER))
+		    ((t->state & TASK_WOKEN_ANY) == TASK_WOKEN_TIMER)) {
+			s->si[0].flags &= ~SI_FL_DONT_WAKE;
+			s->si[1].flags &= ~SI_FL_DONT_WAKE;
 			goto update_exp_and_leave;
+		}
 	}
 
 	/* 1b: check for low-level errors reported at the stream interface.
@@ -2182,7 +2186,7 @@ struct task *process_session(struct task *t)
 		 * to the consumer (which might possibly not be connected yet).
 		 */
 		if (!(s->req->flags & (CF_SHUTR|CF_SHUTW_NOW)))
-			channel_forward(s->req, CHN_INFINITE_FORWARD);
+			channel_forward_forever(s->req);
 	}
 
 	/* check if it is wise to enable kernel splicing to forward request data */
@@ -2213,10 +2217,6 @@ struct task *process_session(struct task *t)
 	if (unlikely((s->req->flags & (CF_SHUTW|CF_SHUTW_NOW|CF_AUTO_CLOSE|CF_SHUTR)) ==
 		     (CF_AUTO_CLOSE|CF_SHUTR))) {
 		channel_shutw_now(s->req);
-		if (tick_isset(s->fe->timeout.clientfin)) {
-			s->rep->wto = s->fe->timeout.clientfin;
-			s->rep->wex = tick_add(now_ms, s->rep->wto);
-		}
 	}
 
 	/* shutdown(write) pending */
@@ -2241,10 +2241,6 @@ struct task *process_session(struct task *t)
 		if (s->req->prod->flags & SI_FL_NOHALF)
 			s->req->prod->flags |= SI_FL_NOLINGER;
 		si_shutr(s->req->prod);
-		if (tick_isset(s->fe->timeout.clientfin)) {
-			s->rep->wto = s->fe->timeout.clientfin;
-			s->rep->wex = tick_add(now_ms, s->rep->wto);
-		}
 	}
 
 	/* it's possible that an upper layer has requested a connection setup or abort.
@@ -2337,7 +2333,7 @@ struct task *process_session(struct task *t)
 		 * to the consumer.
 		 */
 		if (!(s->rep->flags & (CF_SHUTR|CF_SHUTW_NOW)))
-			channel_forward(s->rep, CHN_INFINITE_FORWARD);
+			channel_forward_forever(s->rep);
 
 		/* if we have no analyser anymore in any direction and have a
 		 * tunnel timeout set, use it now. Note that we must respect
@@ -2391,10 +2387,6 @@ struct task *process_session(struct task *t)
 	if (unlikely((s->rep->flags & (CF_SHUTW|CF_SHUTW_NOW|CF_AUTO_CLOSE|CF_SHUTR)) ==
 		     (CF_AUTO_CLOSE|CF_SHUTR))) {
 		channel_shutw_now(s->rep);
-		if (tick_isset(s->be->timeout.serverfin)) {
-			s->req->wto = s->be->timeout.serverfin;
-			s->req->wex = tick_add(now_ms, s->req->wto);
-		}
 	}
 
 	/* shutdown(write) pending */
@@ -2417,10 +2409,6 @@ struct task *process_session(struct task *t)
 		if (s->rep->prod->flags & SI_FL_NOHALF)
 			s->rep->prod->flags |= SI_FL_NOLINGER;
 		si_shutr(s->rep->prod);
-		if (tick_isset(s->be->timeout.serverfin)) {
-			s->req->wto = s->be->timeout.serverfin;
-			s->req->wex = tick_add(now_ms, s->req->wto);
-		}
 	}
 
 	if (s->req->prod->state == SI_ST_DIS || s->req->cons->state == SI_ST_DIS)

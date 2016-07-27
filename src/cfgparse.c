@@ -895,7 +895,12 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		global.uid = atol(args[1]);
+		if (strl2irc(args[1], strlen(args[1]), &global.uid) != 0) {
+			Warning("parsing [%s:%d] :  uid: string '%s' is not a number.\n   | You might want to use the 'user' parameter to use a system user name.\n", file, linenum, args[1]);
+			err_code |= ERR_WARN;
+			goto out;
+		}
+
 	}
 	else if (!strcmp(args[0], "gid")) {
 		if (global.gid != 0) {
@@ -908,7 +913,11 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		global.gid = atol(args[1]);
+		if (strl2irc(args[1], strlen(args[1]), &global.gid) != 0) {
+			Warning("parsing [%s:%d] :  gid: string '%s' is not a number.\n   | You might want to use the 'group' parameter to use a system group name.\n", file, linenum, args[1]);
+			err_code |= ERR_WARN;
+			goto out;
+		}
 	}
 	/* user/group name handling */
 	else if (!strcmp(args[0], "user")) {
@@ -3210,6 +3219,12 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 				if (err) {
 					Alert("parsing [%s:%d] : stick-table: unexpected character '%c' in argument of '%s'.\n",
 					      file, linenum, *err, args[myidx-1]);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				if (val > INT_MAX) {
+					Alert("parsing [%s:%d] : Expire value [%u]ms exceeds maxmimum value of 24.85 days.\n",
+					      file, linenum, val);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
@@ -7131,7 +7146,7 @@ out_uri_auth_compat:
 		list_for_each_entry(bind_conf, &global.stats_fe->conf.bind, by_fe) {
 			unsigned long mask;
 
-			mask = bind_conf->bind_proc ? bind_conf->bind_proc : nbits(global.nbproc);
+			mask = bind_conf->bind_proc ? bind_conf->bind_proc : 0;
 			global.stats_fe->bind_proc |= mask;
 		}
 		if (!global.stats_fe->bind_proc)
@@ -7164,9 +7179,6 @@ out_uri_auth_compat:
 	for (curproxy = proxy; curproxy; curproxy = curproxy->next) {
 		struct listener *listener;
 		unsigned int next_id;
-		int nbproc;
-
-		nbproc = my_popcountl(curproxy->bind_proc & nbits(global.nbproc));
 
 #ifdef USE_OPENSSL
 		/* Configure SSL for each bind line.
@@ -7208,6 +7220,15 @@ out_uri_auth_compat:
 		/* adjust this proxy's listeners */
 		next_id = 1;
 		list_for_each_entry(listener, &curproxy->conf.listeners, by_fe) {
+			int nbproc;
+
+			nbproc = my_popcountl(curproxy->bind_proc &
+			                      (listener->bind_conf->bind_proc ? listener->bind_conf->bind_proc : curproxy->bind_proc) &
+			                      nbits(global.nbproc));
+
+			if (!nbproc) /* no intersection between listener and frontend */
+				nbproc = 1;
+
 			if (!listener->luid) {
 				/* listener ID not set, use automatic numbering with first
 				 * spare entry starting with next_luid.
@@ -7278,7 +7299,7 @@ out_uri_auth_compat:
 #endif /* USE_OPENSSL */
 		}
 
-		if (nbproc > 1) {
+		if (my_popcountl(curproxy->bind_proc & nbits(global.nbproc)) > 1) {
 			if (curproxy->uri_auth) {
 				int count, maxproc = 0;
 

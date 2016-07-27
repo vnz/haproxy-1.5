@@ -1704,8 +1704,10 @@ int parse_binary(const char *source, char **binstr, int *binstrlen, char **err)
 
 bad_input:
 	memprintf(err, "an hex digit is expected (found '%c')", p[i-1]);
-	if (alloc)
-		free(binstr);
+	if (alloc) {
+		free(*binstr);
+		*binstr = NULL;
+	}
 	return 0;
 }
 
@@ -2202,6 +2204,70 @@ char *date2str_log(char *dst, struct tm *tm, struct timeval *date, size_t size)
 	return dst;
 }
 
+/* Base year used to compute leap years */
+#define TM_YEAR_BASE 1900
+
+/* Return the difference in seconds between two times (leap seconds are ignored).
+ * Retrieved from glibc 2.18 source code.
+ */
+static int my_tm_diff(const struct tm *a, const struct tm *b)
+{
+	/* Compute intervening leap days correctly even if year is negative.
+	 * Take care to avoid int overflow in leap day calculations,
+	 * but it's OK to assume that A and B are close to each other.
+	 */
+	int a4 = (a->tm_year >> 2) + (TM_YEAR_BASE >> 2) - ! (a->tm_year & 3);
+	int b4 = (b->tm_year >> 2) + (TM_YEAR_BASE >> 2) - ! (b->tm_year & 3);
+	int a100 = a4 / 25 - (a4 % 25 < 0);
+	int b100 = b4 / 25 - (b4 % 25 < 0);
+	int a400 = a100 >> 2;
+	int b400 = b100 >> 2;
+	int intervening_leap_days = (a4 - b4) - (a100 - b100) + (a400 - b400);
+	int years = a->tm_year - b->tm_year;
+	int days = (365 * years + intervening_leap_days
+	         + (a->tm_yday - b->tm_yday));
+	return (60 * (60 * (24 * days + (a->tm_hour - b->tm_hour))
+	       + (a->tm_min - b->tm_min))
+	       + (a->tm_sec - b->tm_sec));
+}
+
+/* Return the GMT offset for a specific local time.
+ * Both t and tm must represent the same time.
+ * The string returned has the same format as returned by strftime(... "%z", tm).
+ * Offsets are kept in an internal cache for better performances.
+ */
+const char *get_gmt_offset(time_t t, struct tm *tm)
+{
+	/* Cache offsets from GMT (depending on whether DST is active or not) */
+	static char gmt_offsets[2][5+1] = { "", "" };
+
+	char *gmt_offset;
+	struct tm tm_gmt;
+	int diff;
+	int isdst = tm->tm_isdst;
+
+	/* Pretend DST not active if its status is unknown */
+	if (isdst < 0)
+		isdst = 0;
+
+	/* Fetch the offset and initialize it if needed */
+	gmt_offset = gmt_offsets[isdst & 0x01];
+	if (unlikely(!*gmt_offset)) {
+		get_gmtime(t, &tm_gmt);
+		diff = my_tm_diff(tm, &tm_gmt);
+		if (diff < 0) {
+			diff = -diff;
+			*gmt_offset = '-';
+		} else {
+			*gmt_offset = '+';
+		}
+		diff /= 60; /* Convert to minutes */
+		snprintf(gmt_offset+1, 4+1, "%02d%02d", diff/60, diff%60);
+	}
+
+    return gmt_offset;
+}
+
 /* gmt2str_log: write a date in the format :
  * "%02d/%s/%04d:%02d:%02d:%02d +0000" without using snprintf
  * return a pointer to the last char written (\0) or
@@ -2237,13 +2303,17 @@ char *gmt2str_log(char *dst, struct tm *tm, size_t size)
 
 /* localdate2str_log: write a date in the format :
  * "%02d/%s/%04d:%02d:%02d:%02d +0000(local timezone)" without using snprintf
- * * return a pointer to the last char written (\0) or
- * * NULL if there isn't enough space.
+ * Both t and tm must represent the same time.
+ * return a pointer to the last char written (\0) or
+ * NULL if there isn't enough space.
  */
-char *localdate2str_log(char *dst, struct tm *tm, size_t size)
+char *localdate2str_log(char *dst, time_t t, struct tm *tm, size_t size)
 {
+	const char *gmt_offset;
 	if (size < 27) /* the size is fixed: 26 chars + \0 */
 		return NULL;
+
+	gmt_offset = get_gmt_offset(t, tm);
 
 	dst = utoa_pad((unsigned int)tm->tm_mday, dst, 3); // day
 	*dst++ = '/';
@@ -2258,7 +2328,7 @@ char *localdate2str_log(char *dst, struct tm *tm, size_t size)
 	*dst++ = ':';
 	dst = utoa_pad((unsigned int)tm->tm_sec, dst, 3); // secondes
 	*dst++ = ' ';
-	memcpy(dst, localtimezone, 5); // timezone
+	memcpy(dst, gmt_offset, 5); // Offset from local time to GMT
 	dst += 5;
 	*dst = '\0';
 

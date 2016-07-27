@@ -1402,11 +1402,12 @@ get_http_auth(struct session *s)
 	h = ctx.line + ctx.val;
 
 	p = memchr(h, ' ', ctx.vlen);
-	if (!p || p == h)
+	len = p - h;
+	if (!p || len <= 0)
 		return 0;
 
-	chunk_initlen(&auth_method, h, 0, p-h);
-	chunk_initlen(&txn->auth.method_data, p+1, 0, ctx.vlen-(p-h)-1);
+	chunk_initlen(&auth_method, h, 0, len);
+	chunk_initlen(&txn->auth.method_data, p + 1, 0, ctx.vlen - len - 1);
 
 	if (!strncasecmp("Basic", auth_method.str, auth_method.len)) {
 
@@ -4151,6 +4152,12 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 	 */
 	channel_dont_connect(req);
 	req->analysers = 0; /* remove switching rules etc... */
+
+	/* Allow cookie logging
+	 */
+	if (s->be->cookie_name || s->fe->capture_name)
+		manage_client_side_cookies(s, req);
+
 	req->analysers |= AN_REQ_HTTP_TARPIT;
 	req->analyse_exp = tick_add_ifset(now_ms,  s->be->timeout.tarpit);
 	if (!req->analyse_exp)
@@ -4164,6 +4171,12 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 	goto done_without_exp;
 
  deny:	/* this request was blocked (denied) */
+
+	/* Allow cookie logging
+	 */
+	if (s->be->cookie_name || s->fe->capture_name)
+		manage_client_side_cookies(s, req);
+
 	txn->flags |= TX_CLDENY;
 	txn->status = 403;
 	s->logs.tv_request = now;
@@ -4304,8 +4317,7 @@ int http_process_request(struct session *s, struct channel *req, int an_bit)
 	 * the fields will stay coherent and the URI will not move.
 	 * This should only be performed in the backend.
 	 */
-	if ((s->be->cookie_name || s->be->appsession_name || s->fe->capture_name)
-	    && !(txn->flags & (TX_CLDENY|TX_CLTARPIT)))
+	if (s->be->cookie_name || s->be->appsession_name || s->fe->capture_name)
 		manage_client_side_cookies(s, req);
 
 	/*
@@ -4946,11 +4958,13 @@ void http_end_txn_clean_session(struct session *s)
 			s->rep->flags |= CF_EXPECT_MORE;
 	}
 
-	/* we're removing the analysers, we MUST re-enable events detection */
+	/* we're removing the analysers, we MUST re-enable events detection.
+	 * We don't enable close on the response channel since it's either
+	 * already closed, or in keep-alive with an idle connection handler.
+	 */
 	channel_auto_read(s->req);
 	channel_auto_close(s->req);
 	channel_auto_read(s->rep);
-	channel_auto_close(s->rep);
 
 	/* we're in keep-alive with an idle connection, monitor it */
 	si_idle_conn(s->req->cons);
@@ -5001,6 +5015,13 @@ int http_sync_req_state(struct session *s)
 		 */
 		chn->cons->flags |= SI_FL_NOHALF;
 
+		/* In any case we've finished parsing the request so we must
+		 * disable Nagle when sending data because 1) we're not going
+		 * to shut this side, and 2) the server is waiting for us to
+		 * send pending data.
+		 */
+		chn->flags |= CF_NEVER_WAIT;
+
 		if (txn->rsp.msg_state == HTTP_MSG_ERROR)
 			goto wait_other_side;
 
@@ -5015,7 +5036,6 @@ int http_sync_req_state(struct session *s)
 			/* if any side switches to tunnel mode, the other one does too */
 			channel_auto_read(chn);
 			txn->req.msg_state = HTTP_MSG_TUNNEL;
-			chn->flags |= CF_NEVER_WAIT;
 			goto wait_other_side;
 		}
 
@@ -5048,7 +5068,6 @@ int http_sync_req_state(struct session *s)
 			if ((txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_TUN) {
 				channel_auto_read(chn);
 				txn->req.msg_state = HTTP_MSG_TUNNEL;
-				chn->flags |= CF_NEVER_WAIT;
 			}
 		}
 
@@ -5291,9 +5310,18 @@ int http_resync_states(struct session *s)
 		  (txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_KAL)) {
 		/* server-close/keep-alive: terminate this transaction,
 		 * possibly killing the server connection and reinitialize
-		 * a fresh-new transaction.
+		 * a fresh-new transaction, but only once we're sure there's
+		 * enough room in the request and response buffer to process
+		 * another request. The request buffer must not hold any
+		 * pending output data and the request buffer must not have
+		 * output data occupying the reserve.
 		 */
-		http_end_txn_clean_session(s);
+		if (s->req->buf->o)
+			s->req->flags |= CF_WAKE_WRITE;
+		else if (channel_congested(s->rep))
+			s->rep->flags |= CF_WAKE_WRITE;
+		else
+			http_end_txn_clean_session(s);
 	}
 
 	return txn->req.msg_state != old_req_state ||
@@ -5782,8 +5810,6 @@ int http_wait_for_response(struct session *s, struct channel *rep, int an_bit)
 		else if (rep->flags & CF_READ_TIMEOUT) {
 			if (msg->err_pos >= 0)
 				http_capture_bad_message(&s->be->invalid_rep, s, msg, msg->msg_state, s->fe);
-			else if (txn->flags & TX_NOT_FIRST)
-				goto abort_keep_alive;
 
 			s->be->be_counters.failed_resp++;
 			if (objt_server(s->target)) {
@@ -6770,12 +6796,15 @@ int http_response_forward_body(struct session *s, struct channel *res, int an_bi
 	if (res->flags & CF_SHUTR) {
 		if ((s->req->flags & (CF_SHUTR|CF_SHUTW)) == (CF_SHUTR|CF_SHUTW))
 			goto aborted_xfer;
-		if (!(s->flags & SN_ERR_MASK))
-			s->flags |= SN_ERR_SRVCL;
-		s->be->be_counters.srv_aborts++;
-		if (objt_server(s->target))
-			objt_server(s->target)->counters.srv_aborts++;
-		goto return_bad_res_stats_ok;
+		/* If we have some pending data, we continue the processing */
+		if (!buffer_pending(res->buf)) {
+			if (!(s->flags & SN_ERR_MASK))
+				s->flags |= SN_ERR_SRVCL;
+			s->be->be_counters.srv_aborts++;
+			if (objt_server(s->target))
+				objt_server(s->target)->counters.srv_aborts++;
+			goto return_bad_res_stats_ok;
+		}
 	}
 
 	/* we need to obey the req analyser, so if it leaves, we must too */
@@ -8673,10 +8702,13 @@ unsigned int http_get_fhdr(const struct http_msg *msg, const char *hname, int hl
 	}
 	if (-occ > found)
 		return 0;
+
 	/* OK now we have the last occurrence in [hist_ptr-1], and we need to
-	 * find occurrence -occ, so we have to check [hist_ptr+occ].
+	 * find occurrence -occ. 0 <= hist_ptr < MAX_HDR_HISTORY, and we have
+	 * -10 <= occ <= -1. So we have to check [hist_ptr%MAX_HDR_HISTORY+occ]
+	 * to remain in the 0..9 range.
 	 */
-	hist_ptr += occ;
+	hist_ptr += occ + MAX_HDR_HISTORY;
 	if (hist_ptr >= MAX_HDR_HISTORY)
 		hist_ptr -= MAX_HDR_HISTORY;
 	*vptr = ptr_hist[hist_ptr];
@@ -11045,9 +11077,11 @@ find_url_param_pos(char* query_string, size_t query_string_l,
 }
 
 /*
- * Given a url parameter name, returns its value and size into *value and
- * *value_l respectively, and returns non-zero. If the parameter is not found,
- * zero is returned and value/value_l are not touched.
+ * Given a url parameter name and a query string, find the next value.
+ * An empty url_param_name matches the first available parameter.
+ * If the parameter is found, 1 is returned and *value / *value_l are updated
+ * to respectively provide a pointer to the value and its length.
+ * Otherwise, 0 is returned and value/value_l are not modified.
  */
 static int
 find_url_param_value(char* path, size_t path_l,
@@ -11077,7 +11111,7 @@ find_url_param_value(char* path, size_t path_l,
 
 	*value = value_start;
 	*value_l = value_end - value_start;
-	return value_end != value_start;
+	return 1;
 }
 
 static int
@@ -11238,7 +11272,7 @@ static int val_hdr(struct arg *arg, char **err_msg)
  */
 static int sample_conv_http_date(const struct arg *args, struct sample *smp)
 {
-	const char day[7][4] = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+	const char day[7][4] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 	const char mon[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 	struct chunk *temp;
 	struct tm *tm;

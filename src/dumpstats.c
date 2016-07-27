@@ -81,7 +81,7 @@ enum {
 	STAT_CLI_O_CLR,      /* clear tables */
 	STAT_CLI_O_SET,      /* set entries in tables */
 	STAT_CLI_O_STAT,     /* dump stats */
-	STAT_CLI_O_PATS,     /* list all pattern reference avalaible */
+	STAT_CLI_O_PATS,     /* list all pattern reference available */
 	STAT_CLI_O_PAT,      /* list all entries of a pattern */
 	STAT_CLI_O_MLOOK,    /* lookup a map entry */
 	STAT_CLI_O_POOLS,    /* dump memory pools */
@@ -186,12 +186,12 @@ static const char stats_sock_usage_msg[] =
 	"  disable        : put a server or frontend in maintenance mode\n"
 	"  enable         : re-enable a server or frontend which is in maintenance mode\n"
 	"  shutdown       : kill a session or a frontend (eg:to release listening ports)\n"
-	"  show acl [id]  : report avalaible acls or dump an acl's contents\n"
+	"  show acl [id]  : report available acls or dump an acl's contents\n"
 	"  get acl        : reports the patterns matching a sample for an ACL\n"
 	"  add acl        : add acl entry\n"
 	"  del acl        : delete acl entry\n"
 	"  clear acl <id> : clear the content of this acl\n"
-	"  show map [id]  : report avalaible maps or dump a map's contents\n"
+	"  show map [id]  : report available maps or dump a map's contents\n"
 	"  get map        : reports the keys and values matching a sample for a map\n"
 	"  set map        : modify map entry\n"
 	"  add map        : add map entry\n"
@@ -1175,7 +1175,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			else
 				appctx->ctx.map.display_flags = PAT_REF_ACL;
 
-			/* no parameter: display all map avalaible */
+			/* no parameter: display all map available */
 			if (!*args[2]) {
 				appctx->st2 = STAT_ST_INIT;
 				appctx->st0 = STAT_CLI_O_PATS;
@@ -1694,6 +1694,12 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			else if (strcmp(args[2], "http-compression") == 0) {
 				if (strcmp(args[3], "global") == 0) {
 					int v;
+
+					if (s->listener->bind_conf->level < ACCESS_LVL_ADMIN) {
+						appctx->ctx.cli.msg = stats_permission_denied_msg;
+						appctx->st0 = STAT_CLI_PRINT;
+						return 1;
+					}
 
 					if (!*args[4]) {
 						appctx->ctx.cli.msg = "Expects a maximum input byte rate in kB/s.\n";
@@ -4772,6 +4778,7 @@ static int stats_send_http_redirect(struct stream_interface *si)
 		     "Content-Type: text/plain\r\n"
 		     "Connection: close\r\n"
 		     "Location: %s;st=%s%s%s%s\r\n"
+		     "Content-length: 0\r\n"
 		     "\r\n",
 		     uri->uri_prefix,
 		     ((appctx->ctx.stats.st_code > STAT_STATUS_INIT) &&
@@ -5190,7 +5197,7 @@ static int stats_dump_full_sess_to_buffer(struct stream_interface *si, struct se
 			              obj_base_ptr(conn->target));
 
 			chunk_appendf(&trash,
-			              "      flags=0x%08x fd=%d fd_spec_e=%02x fd_spec_p=%d updt=%d\n",
+			              "      flags=0x%08x fd=%d fd.state=%02x fd.cache=%d updt=%d\n",
 			              conn->flags,
 			              conn->t.sock.fd,
 			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].state : 0,
@@ -5293,8 +5300,8 @@ static int stats_pats_list(struct stream_interface *si)
 
 		/* Now, we start the browsing of the references lists.
 		 * Note that the following call to LIST_ELEM return bad pointer. The only
-		 * avalaible field of this pointer is <list>. It is used with the function
-		 * pat_list_get_next() for retruning the first avalaible entry
+		 * available field of this pointer is <list>. It is used with the function
+		 * pat_list_get_next() for retruning the first available entry
 		 */
 		appctx->ctx.map.ref = LIST_ELEM(&pattern_reference, struct pat_ref *, list);
 		appctx->ctx.map.ref = pat_list_get_next(appctx->ctx.map.ref, &pattern_reference,
@@ -5358,7 +5365,7 @@ static int stats_map_lookup(struct stream_interface *si)
 
 			/* execute pattern matching */
 			sample.type = SMP_T_STR;
-			sample.flags |= SMP_F_CONST;
+			sample.flags = SMP_F_CONST;
 			sample.data.str.len = appctx->ctx.map.chunk.len;
 			sample.data.str.str = appctx->ctx.map.chunk.str;
 			if (appctx->ctx.map.expr->pat_head->match &&
