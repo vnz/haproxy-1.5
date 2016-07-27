@@ -2,9 +2,9 @@
                                 HAProxy
                           Configuration Manual
                          ----------------------
-                             version 1.5.15
+                               version 1.5
                              willy tarreau
-                               2015/11/01
+                               2016/05/10
 
 
 This document covers the configuration language as implemented in the version
@@ -2267,11 +2267,11 @@ cookie <name> [ rewrite | insert | prefix ] [ indirect ] [ nocache ]
               of complex combinations of "Set-cookie" and "Cache-control"
               headers is left to the application. The application can then
               decide whether or not it is appropriate to emit a persistence
-              cookie. Since all responses should be monitored, this mode only
-              works in HTTP close mode. Unless the application behaviour is
-              very complex and/or broken, it is advised not to start with this
-              mode for new deployments. This keyword is incompatible with
-              "insert" and "prefix".
+              cookie. Since all responses should be monitored, this mode
+              doesn't work in HTTP tunnel mode. Unless the application
+              behaviour is very complex and/or broken, it is advised not to
+              start with this mode for new deployments. This keyword is
+              incompatible with "insert" and "prefix".
 
     insert    This keyword indicates that the persistence cookie will have to
               be inserted by haproxy in server responses if the client did not
@@ -2297,7 +2297,7 @@ cookie <name> [ rewrite | insert | prefix ] [ indirect ] [ nocache ]
               and a delimiter. The prefix will be removed from all client
               requests so that the server still finds the cookie it emitted.
               Since all requests and responses are subject to being modified,
-              this mode requires the HTTP close mode. The "prefix" keyword is
+              this mode doesn't work with tunnel mode. The "prefix" keyword is
               not compatible with "rewrite" and "insert". Note: it is highly
               recommended not to use "indirect" with "prefix", otherwise server
               cookie updates would not be sent to clients.
@@ -3550,10 +3550,10 @@ maxconn <conns>
   very high so that haproxy manages connection queues, instead of leaving the
   clients with unanswered connection attempts. This value should not exceed the
   global maxconn. Also, keep in mind that a connection contains two buffers
-  of 8kB each, as well as some other data resulting in about 17 kB of RAM being
-  consumed per established connection. That means that a medium system equipped
-  with 1GB of RAM can withstand around 40000-50000 concurrent connections if
-  properly tuned.
+  of tune.bufsize (16kB by default) each, as well as some other data resulting
+  in about 33 kB of RAM being consumed per established connection. That means
+  that a medium system equipped with 1GB of RAM can withstand around
+  20000-25000 concurrent connections if properly tuned.
 
   Also, when <conns> is set to large values, it is possible that the servers
   are not sized to accept such loads, and for this reason it is generally wise
@@ -4363,11 +4363,9 @@ no option http-use-proxy-header
 
   By setting this option in a frontend, haproxy can automatically switch to use
   that non-standard header if it sees proxied requests. A proxied request is
-  defined here as one where the URI begins with neither a '/' nor a '*'. The
-  choice of header only affects requests passing through proxies making use of
-  one of the "httpclose", "forceclose" and "http-server-close" options. Note
-  that this option can only be specified in a frontend and will affect the
-  request along its whole life.
+  defined here as one where the URI begins with neither a '/' nor a '*'. This
+  is incompatible with the HTTP tunnel mode. Note that this option can only be
+  specified in a frontend and will affect the request along its whole life.
 
   Also, when this option is set, a request which requires authentication will
   automatically switch to use proxy authentication headers if it is itself a
@@ -4516,10 +4514,8 @@ no option http_proxy
 
   No host address resolution is performed, so this only works when pure IP
   addresses are passed. Since this option's usage perimeter is rather limited,
-  it will probably be used only by experts who know they need exactly it. Last,
-  if the clients are susceptible of sending keep-alive requests, it will be
-  needed to add "option httpclose" to ensure that all requests will correctly
-  be analyzed.
+  it will probably be used only by experts who know they need exactly it. This
+  is incompatible with the HTTP tunnel mode.
 
   If this option has been enabled in a "defaults" section, it can be disabled
   in a specific instance by prepending the "no" keyword before it.
@@ -5399,7 +5395,7 @@ rate-limit sessions <rate>
             mode tcp
             bind :25
             rate-limit sessions 10
-            server 127.0.0.1:1025
+            server smtp1 127.0.0.1:1025
 
   Note : when the maximum rate is reached, the frontend's status is not changed
          but its sockets appear as "WAITING" in the statistics if the
@@ -5509,7 +5505,8 @@ redirect scheme   <sch> [code <code>] <option> [{if | unless} <condition>]
         redirect scheme https if !{ ssl_fc }
 
   Example: append 'www.' prefix in front of all hosts not having it
-        http-request redirect code 301 location www.%[hdr(host)]%[req.uri] \
+        http-request redirect code 301 location      \
+          http://www.%[hdr(host)]%[capture.req.uri]  \
           unless { hdr_beg(host) -i www }
 
   See section 7 about ACL usage.
@@ -7085,7 +7082,7 @@ stick-table type {ip | integer | string [len <length>] | binary [len <length>]}
 
 
 stick store-response <pattern> [table <table>] [{if | unless} <condition>]
-  Define a request pattern used to create an entry in a stickiness table
+  Define a response pattern used to create an entry in a stickiness table
   May be used in sections :   defaults | frontend | listen | backend
                                  no    |    no    |   yes  |   yes
 
@@ -7789,8 +7786,10 @@ timeout clitimeout <timeout> (deprecated)
   The inactivity timeout applies when the client is expected to acknowledge or
   send data. In HTTP mode, this timeout is particularly important to consider
   during the first phase, when the client sends the request, and during the
-  response while it is reading data sent by the server. The value is specified
-  in milliseconds by default, but can be in any other unit if the number is
+  response while it is reading data sent by the server. That said, for the
+  first phase, it is preferable to set the "timeout http-request" to better
+  protect HAProxy from Slowloris like attacks. The value is specified in
+  milliseconds by default, but can be in any other unit if the number is
   suffixed by the unit, as specified at the top of this document. In TCP mode
   (and to a lesser extent, in HTTP mode), it is highly recommended that the
   client timeout remains equal to the server timeout in order to avoid complex
@@ -7812,7 +7811,8 @@ timeout clitimeout <timeout> (deprecated)
   to use it to write new configurations. The form "timeout clitimeout" is
   provided only by backwards compatibility but its use is strongly discouraged.
 
-  See also : "clitimeout", "timeout server", "timeout tunnel".
+  See also : "clitimeout", "timeout server", "timeout tunnel",
+             "timeout http-request".
 
 
 timeout client-fin <timeout>
@@ -8734,10 +8734,11 @@ The currently supported settings are the following ones.
 
 addr <ipv4|ipv6>
   Using the "addr" parameter, it becomes possible to use a different IP address
-  to send health-checks. On some servers, it may be desirable to dedicate an IP
-  address to specific component able to perform complex tests which are more
-  suitable to health-checks than the application. This parameter is ignored if
-  the "check" parameter is not set. See also the "port" parameter.
+  to send health-checks or to probe the agent-check. On some servers, it may be
+  desirable to dedicate an IP address to specific component able to perform
+  complex tests which are more suitable to health-checks than the application.
+  This parameter is ignored if the "check" parameter is not set. See also the
+  "port" parameter.
 
   Supported in default-server: No
 
@@ -9795,7 +9796,7 @@ different forms :
   - suffix match    (-m end) : the patterns are compared with the end of the
     extracted string, and the ACL matches if any of them matches.
 
-  - subdir match    (-m sub) : the patterns are looked up inside the extracted
+  - subdir match    (-m dir) : the patterns are looked up inside the extracted
     string, delimited with slashes ("/"), and the ACL matches if any of them
     matches.
 
@@ -9848,6 +9849,21 @@ difficult to read and debug configurations. If hostnames are used, you should
 at least ensure that they are present in /etc/hosts so that the configuration
 does not depend on any random DNS match at the moment the configuration is
 parsed.
+
+The dotted IPv4 address notation is supported in both regular as well as the
+abbreviated form with all-0-octets omitted:
+
+    +------------------+------------------+------------------+
+    |   Example 1      |     Example 2    |     Example 3    |
+    +------------------+------------------+------------------+
+    |  192.168.0.1     |   10.0.0.12      |   127.0.0.1      |
+    |  192.168.1       |   10.12          |   127.1          |
+    |  192.168.0.1/22  |   10.0.0.12/8    |   127.0.0.1/8    |
+    |  192.168.1/22    |   10.12/8        |   127.1/8        |
+    +------------------+------------------+------------------+
+
+Notice that this is different from RFC 4632 CIDR address notation in which
+192.168.42/24 would be equivalent to 192.168.42.0/24.
 
 IPv6 may be entered in their usual form, with or without a netmask appended.
 Only bit counts are accepted for IPv6 netmasks. In order to avoid any risk of
@@ -12588,7 +12604,7 @@ Most common cases :
     spent accepting these connections will inevitably slightly delay processing
     of other connections, and it can happen that request times in the order of
     a few tens of milliseconds are measured after a few thousands of new
-    connections have been accepted at once. Setting "option http-server-close"
+    connections have been accepted at once. Using one of the keep-alive modes
     may display larger request times since "Tq" also measures the time spent
     waiting for additional requests.
 
